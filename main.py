@@ -11,7 +11,7 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 
 # ----- Config -----
-DATABASE_URL = "sqlite:///./zabaan.db"
+DATABASE_URL = "sqlite:////tmp/zabaan.db"
 SECRET_KEY = "CHANGE_THIS_TO_A_SECURE_RANDOM_STRING"  # replace for production
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
