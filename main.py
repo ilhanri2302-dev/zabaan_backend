@@ -12,7 +12,7 @@ from jose import JWTError, jwt
 
 # ----- Config -----
 DATABASE_URL = "sqlite:////tmp/zabaan.db"
-SECRET_KEY = "CHANGE_THIS_TO_A_SECURE_RANDOM_STRING"  # replace for production
+SECRET_KEY = "CHANGE_THIS_TO_A_SECURE_RANDOM_STRING"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
 
@@ -28,7 +28,7 @@ class User(SQLModel, table=True):
 class Phrase(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     text: str
-    type: str  # "Feedback" or "Button"
+    type: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
     owner_id: Optional[int] = Field(default=None, foreign_key="user.id")
 
@@ -40,11 +40,10 @@ class Settings(SQLModel, table=True):
     sound_on: bool = True
     theme: str = "dark"
 
-# ----- NEW: Routine model -----
 class Routine(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     title: str
-    type: str  # "Therapeutic" or "General"
+    type: str
     done: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
     owner_id: Optional[int] = Field(default=None, foreign_key="user.id")
@@ -61,14 +60,12 @@ def verify_password(plain, hashed):
     return pwd_context.verify(plain, hashed)
 
 def get_password_hash(password):
-    return pwd_context.hash(password)
+    # bcrypt only supports 72 bytes; enforce limit safely
+    return pwd_context.hash(password[:72])
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -82,7 +79,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ----- Pydantic schemas for requests/responses -----
+# ----- Pydantic Schemas -----
 class PhraseCreate(BaseModel):
     text: str
     type: str
@@ -101,12 +98,11 @@ class SettingsUpdate(BaseModel):
     sound_on: Optional[bool]
     theme: Optional[str]
 
-# ----- NEW: RoutineCreate schema -----
 class RoutineCreate(BaseModel):
     title: str
     type: str
 
-# ----- Dependency helpers -----
+# ----- Dependencies -----
 def get_session():
     with Session(engine) as session:
         yield session
@@ -141,7 +137,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), session: Session
         raise credentials_exception
     return user
 
-# ----- Startup: create DB -----
+# ----- Startup -----
 @app.on_event("startup")
 def on_startup():
     create_db_and_tables()
@@ -151,7 +147,7 @@ def on_startup():
 def root():
     return {"message": "Zabaan Backend (DB) is running 🚀"}
 
-# ----- Auth: register/login/token -----
+# ----- Auth -----
 @app.post("/register", response_model=dict)
 def register(data: UserCreate, session: Session = Depends(get_session)):
     if get_user_by_username(session, data.username):
@@ -160,7 +156,6 @@ def register(data: UserCreate, session: Session = Depends(get_session)):
     session.add(user)
     session.commit()
     session.refresh(user)
-    # create default settings
     settings = Settings(user_id=user.id)
     session.add(settings)
     session.commit()
@@ -175,12 +170,11 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), ses
     access_token = create_access_token(data={"sub": user.username}, expires_delta=access_token_expires)
     return {"access_token": access_token, "token_type": "bearer"}
 
-# ----- Phrases (protected) -----
+# ----- Phrases -----
 @app.get("/phrases", response_model=List[Phrase])
 def read_phrases(session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
     statement = select(Phrase).where(Phrase.owner_id == current_user.id).order_by(Phrase.created_at.desc())
-    results = session.exec(statement).all()
-    return results
+    return session.exec(statement).all()
 
 @app.post("/phrases", response_model=Phrase, status_code=201)
 def create_phrase(payload: PhraseCreate, session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
@@ -195,8 +189,7 @@ def update_phrase(phrase_id: int, payload: PhraseCreate, session: Session = Depe
     phrase = session.get(Phrase, phrase_id)
     if not phrase or phrase.owner_id != current_user.id:
         raise HTTPException(status_code=404, detail="Phrase not found")
-    phrase.text = payload.text
-    phrase.type = payload.type
+    phrase.text, phrase.type = payload.text, payload.type
     session.add(phrase)
     session.commit()
     session.refresh(phrase)
@@ -211,49 +204,34 @@ def delete_phrase(phrase_id: int, session: Session = Depends(get_session), curre
     session.commit()
     return {"message": "Phrase deleted"}
 
-# ----- Settings endpoints -----
+# ----- Settings -----
 @app.get("/settings")
 def get_settings(session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
     statement = select(Settings).where(Settings.user_id == current_user.id)
     settings = session.exec(statement).first()
     if not settings:
-        # create default if missing
         settings = Settings(user_id=current_user.id)
         session.add(settings)
         session.commit()
         session.refresh(settings)
-    return {
-        "confidence_threshold": settings.confidence_threshold,
-        "vibration_on": settings.vibration_on,
-        "sound_on": settings.sound_on,
-        "theme": settings.theme,
-    }
+    return settings
 
 @app.put("/settings")
 def update_settings(payload: SettingsUpdate, session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
     statement = select(Settings).where(Settings.user_id == current_user.id)
-    settings = session.exec(statement).first()
-    if not settings:
-        settings = Settings(user_id=current_user.id)
-    if payload.confidence_threshold is not None:
-        settings.confidence_threshold = payload.confidence_threshold
-    if payload.vibration_on is not None:
-        settings.vibration_on = payload.vibration_on
-    if payload.sound_on is not None:
-        settings.sound_on = payload.sound_on
-    if payload.theme is not None:
-        settings.theme = payload.theme
+    settings = session.exec(statement).first() or Settings(user_id=current_user.id)
+    for key, value in payload.dict(exclude_unset=True).items():
+        setattr(settings, key, value)
     session.add(settings)
     session.commit()
     session.refresh(settings)
     return {"message": "Settings updated"}
 
-# ----- Routines endpoints (protected) -----
+# ----- Routines -----
 @app.get("/routines", response_model=List[Routine])
 def read_routines(session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
     statement = select(Routine).where(Routine.owner_id == current_user.id).order_by(Routine.created_at.desc())
-    results = session.exec(statement).all()
-    return results
+    return session.exec(statement).all()
 
 @app.post("/routines", response_model=Routine, status_code=201)
 def create_routine(data: RoutineCreate, session: Session = Depends(get_session), current_user: User = Depends(get_current_user)):
@@ -283,16 +261,21 @@ def delete_routine(routine_id: int, session: Session = Depends(get_session), cur
     session.commit()
     return {"message": "Deleted"}
 
-# ----- Dev helper: create a dev user (optional) -----
+# ----- Fixed Dev Helper -----
 @app.post("/create_dev_user")
 def create_dev_user(session: Session = Depends(get_session)):
-    if get_user_by_username(session, "dev"):
-        return {"message": "dev user exists"}
-    user = User(username="dev", hashed_password=get_password_hash("devpass"))
+    """Creates or repairs the default dev user for testing"""
+    existing = get_user_by_username(session, "dev")
+    if existing:
+        return {"message": "Dev user already exists"}
+    password = "devpass"
+    hashed = get_password_hash(password[:72])
+    user = User(username="dev", hashed_password=hashed)
     session.add(user)
     session.commit()
     session.refresh(user)
     settings = Settings(user_id=user.id)
     session.add(settings)
     session.commit()
-    return {"message": "dev user created (username=dev, password=devpass)"}
+    return {"message": "Dev user created", "username": "dev", "password": password}
+
